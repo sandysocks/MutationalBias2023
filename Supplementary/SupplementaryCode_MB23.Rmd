@@ -1,0 +1,1162 @@
+---
+title: "SandySups"
+author: "Sandy Hickson"
+date: "2022-09-05"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+#Suplimenary Material
+###Data Wrangling
+```{r, warning=FALSE, echo = FALSE}
+library(data.table)
+library(tidyverse)
+
+CHROM <- fread("../data/scaff2gene.txt") %>% 
+  select(!V1) %>% 
+  mutate(CHROM_SH=case_when(CHROM=="X" ~ "X",
+                            CHROM=="NA" ~ "NA",
+                            TRUE ~ "Auto")) %>% 
+  select(geneID,CHROM, CHROM_SH)
+
+Vm <- read.table(file = '../data/MutaionBias_2022_MutationVariantionData.txt', 
+                 sep = '\t', header = TRUE) %>% 
+  select(geneID, varM, varF, p_varM, p_varF)
+
+SexBias <- fread("../data/SexBias_TMM2.txt") %>%
+  select(geneID, bias, deltaM_M, deltaM_F, sexbias, sexbias_MA, CHROM_SH)
+
+
+SexBias %>%
+  select(-deltaM_M, -deltaM_F) %>% 
+  rename(ANC = sexbias, MA = sexbias_MA) %>% 
+  pivot_longer(cols = c("ANC", "MA"), 
+               names_to = "treatment", 
+               values_to = "sexbias") %>% 
+  inner_join(Vm, by = c("geneID")) -> SexBias_Vm
+
+SexBias %>%
+  inner_join(Vm, by = c("geneID")) %>% 
+  pivot_longer(cols = c(-"geneID", -"sexbias", -"sexbias_MA", -"CHROM_SH", -"bias"),
+               names_pattern = "(.*)(.)$",
+               names_to = c("name", "Sex")) %>% 
+  pivot_wider(values_from = "value", names_from = "name") ->
+  deltaM_Vm  
+
+write.table(SexBias_Vm, "../data/temp_SexBias_Vm.txt")
+write.table(deltaM_Vm, "../data/temp_deltaM_Vm.txt")
+
+fread( "../data/MutaionBias_2022_MutationVariantionData.txt")
+
+deltaM_Vm %>% 
+  filter(Sex == "M" & var != 0) %>% 
+  count(CHROM_SH)
+
+```
+
+
+
+##Mutational Varinace Estimates
+Here I show the code I used to calculate mutational variance. Run this code chunk to over-ride the SAS output. 
+<br>
+<br>
+I am suspicious of the SAS outputs given to me as they seem to have been done on log2 transformed data.
+
+```{r, eval = FALSE}
+
+library(data.table)
+library(tidyverse)
+library(doParallel)
+library(lme4)
+
+#Read in Data
+dat <- fread("../data/normData_tall_coexpressed2_incAncestor_TMM_strictCPM2.txt") %>% 
+  # filter(treatment == "Ancestor" |
+  #         treatment == "MA" ) %>%
+  filter(!is.na(CHROM)) %>% 
+  mutate(Recip = case_when(str_detect(sampleID, "FM") ~ "FM",
+                        str_detect(sampleID, "MM") ~ "MM",
+                        str_detect(sampleID, "MF") ~ "MF",
+                        str_detect(sampleID, "FF") ~ "FF")) %>% 
+  filter(!(CHROM == "X" &  Recip == "MM"))# %>% 
+  # mutate(expr_TMM = 2^expr_TMM)
+
+SexBias <- fread("../data/SexBias_TMM2.txt") %>% 
+   select(!V1)
+
+###########################
+hund.genes <- as.data.frame(unique(dat$geneID)[1:300]) %>% 
+  setnames("geneID")
+
+test <- inner_join(hund.genes, dat, by = "geneID")
+
+
+# for(i in 1:n_distinct(dat$geneID)){
+#detectCores()
+registerDoParallel(6)
+start <- proc.time()[3]
+Var <- foreach(i = 1:n_distinct(dat$geneID), .combine = rbind, 
+                    .packages = c("tidyverse", "lme4"),
+                    .errorhandling = "remove") %dopar% {
+                      
+
+  genename <- unique(dat$geneID)[i]
+  
+  #MAle
+  dat %>% 
+    filter(geneID == genename & 
+             treatment == "MA", offspringSex == "male") -> testMA
+  
+  
+  model1 <- lmer(expr_TMM ~ extractionBatch + libraryBatch + 
+                   freezeTime + Recip + (1|line), data = testMA)
+  
+  vc_MA <- VarCorr(model1)
+  Vm <- data.frame(vc_MA,comp=c("Variance"))[1,4]
+
+  #############
+  
+  dat %>% 
+    filter(geneID == genename & treatment == "SGV", offspringSex == "male") -> testSGV
+  
+  
+  model1 <- lmer(expr_TMM ~ extractionBatch + libraryBatch + 
+                   freezeTime + Recip + (1|line), data = testSGV)
+  
+  vc_SGV <- VarCorr(model1)
+  Vg <- data.frame(vc_SGV,comp=c("Variance"))[1,4]
+    
+  temp_M <- data.frame(cbind(genename, Vm, Vg))
+  temp_M$sex = "M"
+  
+  ###########################################
+  ##########################################
+  #Female
+    dat %>% 
+    filter(geneID == genename & treatment == "MA", 
+           offspringSex == "female") -> testMA
+  
+  
+  model1 <- lmer(expr_TMM ~ extractionBatch + libraryBatch + 
+                   freezeTime + Recip + (1|line), data = testMA)
+  
+  vc_MA <- VarCorr(model1)
+  Vm <- data.frame(vc_MA,comp=c("Variance"))[1,4]
+
+  #############
+  
+  dat %>% 
+    filter(geneID == genename & treatment == "SGV", 
+           offspringSex == "female") -> testSGV
+  
+  
+  model1 <- lmer(expr_TMM ~ extractionBatch + libraryBatch + 
+                   freezeTime + Recip + (1|line), data = testSGV)
+  
+  vc_SGV <- VarCorr(model1)
+  Vg <- data.frame(vc_SGV,comp=c("Variance"))[1,4]
+    
+  temp_F <- data.frame(cbind(genename, Vm, Vg))
+  temp_F$sex = "F"
+  
+  rbind(temp_M, temp_F)
+
+  # if(i==1){Var <- temp}
+  # if(i>1){Var <- rbind(Var,temp)}
+                    }
+Var
+
+########################################################
+
+qtime <- proc.time()[3] - start
+
+start <- proc.time()[3]
+
+for(i in 1:n_distinct(test$geneID)){
+  genename <- unique(test$geneID)[i]
+  
+  test %>% 
+    filter(geneID == genename & treatment == "MA") -> testMA
+  
+  
+  model1 <- lm(expr_TMM ~ extractionBatch + libraryBatch + 
+                   freezeTime + Recip + line, data = testMA)
+  pMA <- anova(model1)
+
+  Vm <-   pMA$`Pr(>F)`[5]
+
+  ########################################
+  
+  test %>% 
+    filter(geneID == genename & treatment == "SGV") -> testSGV
+  
+  
+  model1 <- lm(expr_TMM ~ extractionBatch + libraryBatch + 
+                   freezeTime + Recip + line, data = testSGV)
+  pSGV <- anova(model1)
+
+  Vm <-   pSGV$`Pr(>F)`[5]
+  
+  temp <- data.frame(cbind(geneID, Vm, Vg))
+
+  if(i < 2){Varp <- temp}
+  if(i > 1){Varp <- rbind(Varp, temp)}
+}
+
+time <- proc.time()[3] - start
+
+Var %>% 
+  rename(geneID = genename) %>%
+  mutate(Vm = as.numeric(Vm),
+         Vg = as.numeric(Vg),
+         Vm.Vg = Vm/Vg) %>% 
+  inner_join(select(SexBias, geneID, bias), by = "geneID") -> SB
+
+SB %>% 
+  filter(!(Vm == 0 | Vg == 0)) %>% 
+  ggplot(aes(x= bias, y= log2(Vg), col = sex)) +
+  geom_boxplot()+
+  ylim(0,25)
+  
+write.table(SB, file = "Variance_exprTMM.txt")              
+###############################################
+#Look for correlation with Seans Vm data
+
+read.table(file = 'QG_MA2.txt', sep = '\t', header = TRUE) -> bigDat
+
+SB %>%
+  select(geneID, Vm, sex, bias) %>% 
+  pivot_wider(values_from = "Vm", names_from = sex) %>% 
+  inner_join(select(bigDat, geneID, varF, varM), by = "geneID") -> Vm_Comp
+  
+Vm_Comp %>% 
+  ggplot(aes(x=(M), y= varM))+
+  geom_point()+
+  xlim(0,500)
+
+```
+
+```{r, eval = FALSE}
+
+library(data.table)
+library(tidyverse)
+library(doParallel)
+library(lme4)
+
+#Read in Data
+dat <- fread("../data/normData_tall_coexpressed2_incAncestor_TMM_strictCPM2.txt") %>%
+  filter(!is.na(CHROM)) %>% 
+  mutate(Recip = case_when(str_detect(sampleID, "FM") ~ "FM",
+                        str_detect(sampleID, "MM") ~ "MM",
+                        str_detect(sampleID, "MF") ~ "MF",
+                        str_detect(sampleID, "FF") ~ "FF")) %>% 
+  filter(!(CHROM == "X" &  Recip == "MM")) %>% 
+  mutate(expr_TMM = 2^expr)
+
+
+SexBias <- fread("../data/SexBias_TMM2.txt") %>% 
+   select(!V1)
+
+###########################
+n_distinct(dat$geneID)
+
+registerDoParallel(6)
+start <- proc.time()[3]
+Var <- foreach(i = 1:100, .combine = rbind, 
+                    .packages = c("tidyverse", "lme4"),
+                    .errorhandling = "remove") %dopar% {
+                      
+
+  genename <- unique(dat$geneID)[i]
+  
+  #MAle
+  dat %>% 
+    filter(geneID == genename & 
+             group == "MA", offspringSex == "male") -> testMA
+  
+  
+  model1 <- lmer(expr_TMM ~ extractionBatch + libraryBatch + 
+                   freezeTime + Recip + (1|line), data = testMA)
+  
+  vc_MA <- VarCorr(model1)
+  Vm <- data.frame(vc_MA,comp=c("Variance"))[1,4]
+
+  #############
+
+  temp_M <- data.frame(cbind(genename, Vm))
+  temp_M$sex = "M"
+  
+  ###########################################
+  ##########################################
+  #Female
+    dat %>% 
+    filter(geneID == genename & group == "MA", 
+           offspringSex == "female") -> testMA
+  
+  
+  model1 <- lmer(expr_TMM ~ extractionBatch + libraryBatch + 
+                   freezeTime + Recip + (1|line), data = testMA)
+  
+  vc_MA <- VarCorr(model1)
+  Vm <- data.frame(vc_MA,comp=c("Variance"))[1,4]
+
+  #############
+    
+  temp_F <- data.frame(cbind(genename, Vm))
+  temp_F$sex = "F"
+  
+  rbind(temp_M, temp_F)
+
+                    }
+Var
+
+########################################################
+
+qtime <- proc.time()[3] - start
+
+start <- proc.time()[3]
+
+for(i in 1:100){
+  geneID <- unique(dat$geneID)[i]
+  
+  dat %>% 
+    filter(geneID == genename & treatment == "MA") -> testMA
+  
+  
+  model1 <- lm(expr_TMM ~ extractionBatch + 
+                 libraryBatch + offspringSex  + 
+                   freezeTime + Recip + line, data = testMA)
+  
+  pMA <- anova(model1)
+
+  pVm <-   pMA$`Pr(>F)`[6]
+
+  
+  temp <- data.frame(cbind(geneID, Vm))
+
+  if(i < 2){p.var <- temp}
+  if(i > 1){p.var <- rbind(p.var, temp)}
+}
+
+time <- proc.time()[3] - start
+paste("It would talk about",time*80/60, "minutes bro")
+
+
+Var %>% 
+  rename(geneID = genename) %>%
+  mutate(Vm = as.numeric(Vm),
+         Vg = as.numeric(Vg),
+         Vm.Vg = Vm/Vg) %>% 
+  inner_join(select(SexBias, geneID, bias), by = "geneID") -> SB
+
+SB %>% 
+  filter(!(Vm == 0 | Vg == 0)) %>% 
+  ggplot(aes(x= bias, y= log2(Vg), col = sex)) +
+  geom_boxplot()+
+  ylim(0,25)
+  
+write.table(SB, file = "../data/Variance_exprTMM.txt")              
+###############################################
+#Look for correlation with Seans Vm data
+
+read.table(file = '../data/QG_MA2.txt', sep = '\t', header = TRUE) -> bigDat
+
+SB %>%
+  select(geneID, Vm, sex, bias) %>% 
+  pivot_wider(values_from = "Vm", names_from = sex) %>% 
+  inner_join(select(bigDat, geneID, varF, varM), by = "geneID") -> Vm_Comp
+  
+Vm_Comp %>% 
+  ggplot(aes(x=(M), y= varM))+
+  geom_point()+
+  xlim(0,500)
+
+```
+
+###Variance using ANOVA
+```{r}
+library(data.table)
+library(tidyverse)
+
+dat <- fread("../data/normData_tall_coexpressed2_incAncestor_TMM_strictCPM2.txt") %>%
+  filter(!is.na(CHROM)) %>% 
+  mutate(Recip = case_when(str_detect(sampleID, "FM") ~ "FM",
+                        str_detect(sampleID, "MM") ~ "MM",
+                        str_detect(sampleID, "MF") ~ "MF",
+                        str_detect(sampleID, "FF") ~ "FF")) %>% 
+  filter(!(CHROM == "X" &  Recip == "MM")) %>% 
+  mutate(expr_TMM = 2^expr)
+
+SexBias <- fread("../data/SexBias_TMM2.txt") %>%
+  select(geneID, bias, deltaM_M, deltaM_F, sexbias, sexbias_MA, CHROM_SH)
+
+n_distinct(dat$geneID)
+
+for(i in 1:n_distinct(dat$geneID)){  
+  genename <- unique(dat$geneID)[i]
+  
+#MAle
+  dat %>% 
+    filter(geneID == genename & 
+             group == "MA", offspringSex == "male") -> test_M
+    
+    
+    model1 <- lm(expr_TMM ~ extractionBatch + libraryBatch + 
+                   freezeTime + line, data = test_M)
+    
+    
+    Aov <- Anova(model1)
+    
+    Vm_M <- Aov$`Sum Sq`[4]/Aov$Df[4]
+    pVm_M <- Aov$`Pr(>F)`[4]
+    
+    #############
+
+#Female
+  dat %>% 
+    filter(geneID == genename & 
+             group == "MA", offspringSex == "female") -> test_F
+    
+    
+    model2 <- lm(expr_TMM ~ extractionBatch + libraryBatch + 
+                   freezeTime + line, data = test_F)
+    
+    
+    Aov <- Anova(model2)
+    
+    Vm_F <- Aov$`Sum Sq`[4]/Aov$Df[4]
+    pVm_F <- Aov$`Pr(>F)`[4]
+    
+    #############
+    
+    temp <- data.frame(cbind(genename, Vm_M, pVm_M, Vm_F, pVm_F)) %>% 
+      rename(geneID = genename)
+
+    
+    if(i < 2){vm.compare <- temp}
+    if(i > 1){vm.compare <- rbind(vm.compare, temp)}
+}
+
+vm.compare %>% 
+  mutate(varM = as.numeric(Vm_M), 
+         p_varM = as.numeric(pVm_M), 
+         varF = as.numeric(Vm_F), 
+         p_varF = as.numeric(pVm_F)) %>% 
+  select(geneID, varM, p_varM, varF, p_varF) -> 
+  Vm_Anova
+
+# vm.compare %>% 
+#   inner_join(SexBias, by = "geneID") -> SexBias_Vm
+
+# vm.compare %>%   
+#   ggplot(aes(x= as.numeric(pVm_F)))+
+#   geom_histogram()
+# 
+# 
+# SexBias_Vm %>%
+#   ggplot(aes(y= log2(as.numeric(Vm_F)), fill = bias))+
+#   geom_boxplot()
+# 
+# SexBias_Vm %>%
+#   ggplot(aes(y= log2(as.numeric(Vm_M)), fill = bias))+
+#   geom_boxplot()
+
+##Read in my variance calculations 
+SexBias %>% 
+  select(geneID, bias, sexbias, sexbias_MA, CHROM_SH) %>%
+  rename(ANC = sexbias, MA = sexbias_MA) %>% 
+  pivot_longer(cols = c("ANC", "MA"), 
+               names_to = "treatment", 
+               values_to = "sexbias") %>% 
+  inner_join(Vm_Anova, by = c("geneID")) -> SexBias_Vm
+
+SexBias %>%
+  inner_join(Vm_Anova, by = c("geneID")) %>% 
+  pivot_longer(cols = c(-"geneID", -"sexbias", -"sexbias_MA", -"CHROM_SH", -"bias"),
+               names_pattern = "(.*)(.)$",
+               names_to = c("name", "Sex")) %>% 
+  pivot_wider(values_from = "value", names_from = "name") ->
+    deltaM_Vm  
+
+write.table(SexBias_Vm, "../data/temp_SexBias_Vm.txt")
+write.table(deltaM_Vm, "../data/temp_deltaM_Vm.txt")
+
+
+deltaM_Vm %>%
+  ggplot(aes(x= bias, y= log2(var), fill = Sex))+
+  geom_boxplot()
+  
+```
+
+
+```{r, eval = FALSE}
+
+
+##Read in my variance calculations 
+Variance_exprTMM <- fread("../data/Variance_exprTMM.txt") %>% 
+  select(geneID, sex, Vm) %>% 
+  pivot_wider(names_from = "sex", values_from = "Vm", names_prefix = "var")
+
+SexBias <- fread("../data/SexBias_TMM2.txt") %>% 
+  select(-V1)
+
+SexBias %>% 
+  select(geneID, bias, sexbias, sexbias_MA, CHROM_SH) %>%
+  rename(ANC = sexbias, MA = sexbias_MA) %>% 
+  pivot_longer(cols = c("ANC", "MA"), 
+               names_to = "treatment", 
+               values_to = "sexbias") %>% 
+  inner_join(Variance_exprTMM, by = c("geneID")) -> temp_SexBias_Vm
+
+
+SexBias %>%
+  inner_join(Variance_exprTMM, by = c("geneID")) %>% 
+  pivot_longer(cols = c(-"geneID", -"sexbias", -"sexbias_MA", -"CHROM_SH", -"bias"),
+               names_pattern = "(.*)(.)$",
+               names_to = c("name", "Sex")) %>% 
+  pivot_wider(values_from = "value", names_from = "name") ->
+  deltaM_Vm  
+
+
+
+write.table(temp_SexBias_Vm, "../data/temp_SexBias_Vm.txt")
+# write.table(deltaM_Vm, "../data/temp_deltaM_Vm.txt")
+
+fread("../data/SexBias_Vm.txt")
+```
+
+
+##Sex-bias 
+Applying Thresholding to Sex-biased Gene Expression.
+Here I run through a variety of plots that display the trends in sex-bias, given a variety of thresholds on mutational variance
+###Make table
+```{r}
+SexBias_Vm <- read.table("../data/temp_SexBias_Vm.txt")
+
+
+```
+
+###No Threshold
+```{r}
+### SexBias
+SexBias_Vm <- read.table("../data/temp_SexBias_Vm.txt")
+
+#No Threshold
+##Histogram
+SexBias_Vm %>% 
+  ggplot() +
+  theme_classic() +
+  geom_histogram(aes(x=abs(sexbias), fill=treatment),
+                 position = "identity",
+                 alpha = 0.5, binwidth = .1)+
+  labs(x=expression("Absolute Sex-bias"))
+
+##Boxplot
+SexBias_Vm %>%
+  ggplot(aes(x=bias, y=abs(sexbias), fill= treatment, col=NULL))+
+  geom_boxplot(notch=TRUE)+
+  labs(y="Absolute Sex-bias")+
+  coord_flip()+
+  scale_fill_manual(values=c("#C6000F", "dodgerblue4"))+
+  theme_bw()
+```
+
+Mutation Variance greater than 0 in either males or females
+```{r}
+library(data.table)
+library(tidyverse)
+
+### SexBias
+SexBias_Vm <- fread("../data/temp_SexBias_Vm.txt") 
+##Vm != 0
+count <- filter(SexBias_Vm, varF != 0 | varM != 0)$geneID %>%
+  n_distinct()
+
+
+paste("of the original 7,891 coexpressed genes", 
+      count, 
+      "genes remain")
+##Histogram
+SexBias_Vm %>%
+  filter(varF != 0 | 
+           varM != 0) %>% 
+  ggplot() +
+  theme_classic() +
+  geom_histogram(aes(x=abs(sexbias), fill=treatment),
+                 position = "identity",
+                 alpha = 0.5, binwidth = .1)+
+  labs(x=expression("Absolute Sex-bias"), tag = paste("n=",count))
+
+##Boxplot
+SexBias_Vm %>%
+  filter(varF != 0 | 
+           varM != 0) %>%
+  ggplot(aes(x=bias, y=abs(sexbias), fill= treatment, col=NULL))+
+  geom_boxplot(notch=TRUE)+
+  labs(y="Absolute Sex-bias", tag = paste("n=",count))+
+  coord_flip()+
+  theme_bw()
+
+
+  
+
+
+```
+Mutation Variance greater than 0 in both males & females
+```{r}
+library(data.table)
+library(tidyverse)
+
+### SexBias
+SexBias_Vm <- fread("../data/temp_SexBias_Vm.txt") %>% 
+  select(-V1)
+##Vm != 0
+count <- filter(SexBias_Vm, varF != 0 & varM != 0)$geneID %>%
+  n_distinct()
+  
+
+paste("of the original 7,891 coexpressed genes", 
+      count, 
+      "genes remain")
+##Histogram
+SexBias_Vm %>%
+  filter(varF != 0 & 
+           varM != 0) %>% 
+  ggplot() +
+  theme_classic() +
+  geom_histogram(aes(x=abs(sexbias), fill=treatment),
+                 position = "identity",
+                 alpha = 0.5, binwidth = .1)+
+  labs(x=expression("Absolute Sex-bias"), tag = paste("n=",count))
+
+count <- filter(SexBias_Vm, varF != 0 & varM != 0)$geneID %>%
+  n_distinct()
+  
+
+paste("of the original 7,891 coexpressed genes", 
+      count, 
+      "genes remain")##Boxplot
+SexBias_Vm %>%
+  filter(varF != 0 & 
+          varM != 0) %>% 
+  ggplot(aes(x=bias, y=abs(sexbias), fill= treatment, col=NULL))+
+  geom_boxplot(notch=TRUE)+
+  labs(y="Absolute Sex-bias", tag = paste("n=",count))+
+  coord_flip()+
+  theme_bw()
+
+
+```
+
+###Significant Mutational Variance (p < 0.05)
+Mutation Variance is significant (p < 0.05) in either males or females
+```{r}
+library(data.table)
+library(tidyverse)
+
+### SexBias
+SexBias_Vm <- fread("../data/temp_SexBias_Vm.txt") %>% 
+  select(-V1)
+##Vm != 0
+count <- filter(SexBias_Vm, p_varM < 0.05 | p_varF < 0.05)$geneID %>%
+  n_distinct()
+  
+
+paste("of the original 7,891 coexpressed genes", 
+      count, 
+      "genes remain")
+##Histogram
+SexBias_Vm %>%
+  filter(p_varM < 0.05 | 
+           p_varF < 0.05) %>% 
+  ggplot() +
+  theme_classic() +
+  geom_histogram(aes(x=abs(sexbias), fill=treatment),
+                 position = "identity",
+                 alpha = 0.5, binwidth = .1)+
+  labs(x=expression("Absolute Sex-bias"), tag = paste("n=",count))
+
+##Boxplot
+SexBias_Vm %>%
+  filter(p_varM < 0.05 | 
+           p_varF < 0.05) %>% 
+  ggplot(aes(x=bias, y=abs(sexbias), fill= treatment, col=NULL))+
+  geom_boxplot(notch=TRUE)+
+  labs(y="Absolute Sex-bias", tag = paste("n=",count))+
+  coord_flip()+
+  theme_bw()
+
+```
+
+Mutation variance is significant (p < 0.05) in both males and females
+```{r}
+library(data.table)
+library(tidyverse)
+
+### SexBias
+SexBias_Vm <- fread("../data/temp_SexBias_Vm.txt") %>% 
+  select(-V1)
+##Vm != 0
+count <- filter(SexBias_Vm, p_varM < 0.05 & p_varF < 0.05)$geneID %>%
+  n_distinct()
+  
+
+paste("of the original 7,891 coexpressed genes", 
+      count, 
+      "genes remain")
+##Histogram
+SexBias_Vm %>%
+  filter(p_varM < 0.05 & 
+           p_varF < 0.05) %>% 
+  ggplot() +
+  theme_classic() +
+  geom_histogram(aes(x=abs(sexbias), fill=treatment),
+                 position = "identity",
+                 alpha = 0.5, binwidth = .1)+
+  labs(x=expression("Absolute Sex-bias"))
+
+##Boxplot
+SexBias_Vm %>%
+  filter(p_varM < 0.05 & 
+           p_varF < 0.05) %>% 
+  ggplot(aes(x=bias, y=abs(sexbias), fill= treatment, col=NULL))+
+  geom_boxplot(notch=TRUE)+
+  labs(y="Absolute Sex-bias")+
+  coord_flip()+
+  theme_bw()
+
+```
+
+##Mutational Bias
+Applying Thresholding to Mutational Bias in Gene Expression
+```{r}
+library(data.table)
+library(tidyverse)
+
+### deltaM
+deltaM_Vm <- fread("../data/temp_deltaM_Vm.txt") %>% 
+  select(-V1)
+
+#No Threshold 
+deltaM_Vm %>%
+  filter(CHROM_SH == "Auto") %>% 
+  ggplot(aes(x=bias, y=(deltaM_), fill=Sex, col=NULL))+
+  geom_boxplot(notch=TRUE)+
+  #facet_grid(rows = vars(Sex))+
+  geom_hline(yintercept=0, color="black", linetype="dashed", size=1)+
+  labs(tag = "A", title = "Auto, No Thresh")+
+  labs(y=expression(Delta*"M"))+
+  coord_flip()+
+  scale_fill_manual(values=c("#C6000F", "dodgerblue4"))
+
+deltaM_Vm %>%
+  filter(CHROM_SH == "X") %>% 
+  ggplot(aes(x=bias, y=(deltaM_), fill=Sex, col=NULL))+
+  geom_boxplot(notch=TRUE)+
+  #facet_grid(rows = vars(Sex))+
+  geom_hline(yintercept=0, color="black", linetype="dashed", size=1)+
+  labs(tag = "A", title = "X, No Thresh")+
+  labs(y=expression(Delta*"M"))+
+  coord_flip()+
+  scale_fill_manual(values=c("#C6000F", "dodgerblue4"))
+```
+
+Mutational bias of genes with a mutational variance > 0
+```{r}
+library(data.table)
+library(tidyverse)
+
+#Vm != 0
+
+#Auto
+count_M <- filter(deltaM_Vm, CHROM_SH == "Auto" & var != 0 & Sex == "M") %>% 
+  n_distinct()
+count_F <- filter(deltaM_Vm, CHROM_SH == "Auto" & var != 0 & Sex == "F") %>% 
+  n_distinct()
+
+deltaM_Vm %>%
+  filter(CHROM_SH == "Auto") %>% 
+  filter(var != 0) %>% 
+  ggplot(aes(x=bias, y=(deltaM_), fill=Sex, col=NULL))+
+  geom_boxplot(notch=TRUE)+
+  #facet_grid(rows = vars(Sex))+
+  geom_hline(yintercept=0, color="black", linetype="dashed", size=1)+
+  labs(title = paste("male =",count_M, ", female =", count_F, "; Auto; Vm != 0"))+
+  labs(y=expression(Delta*"M"))+
+  coord_flip()+
+  scale_fill_manual(values=c("#C6000F", "dodgerblue4"))
+
+#X-chrom
+count_M <- filter(deltaM_Vm, CHROM_SH == "X" & var != 0 & Sex == "M") %>% 
+  n_distinct()
+count_F <- filter(deltaM_Vm, CHROM_SH == "X" & var != 0 & Sex == "F") %>% 
+  n_distinct()
+
+deltaM_Vm %>% 
+  filter(CHROM_SH == "X") %>% 
+  filter(var != 0) %>% 
+  ggplot(aes(x=bias, y=(deltaM_), fill=Sex, col=NULL))+
+  geom_boxplot(notch=TRUE)+
+  #facet_grid(rows = vars(Sex))+
+  geom_hline(yintercept=0, color="black", linetype="dashed", size=1)+
+  labs(title = paste("male =",count_M, ", female =", count_F, "; X-Chromosome; Vm != 0"))+
+  labs(y=expression(Delta*"M"))+
+  coord_flip()+
+  scale_fill_manual(values=c("#C6000F", "dodgerblue4"))
+
+```
+
+Mutational bias of genes with a mutational variance significantly > 0 (p < 0.05)
+```{r}
+library(data.table)
+library(tidyverse)
+
+## pVm < 0.05
+#Auto
+count_M <- filter(deltaM_Vm, CHROM_SH == "Auto" & p_var < 0.05 & Sex == "M") %>% 
+  n_distinct()
+count_F <- filter(deltaM_Vm, CHROM_SH == "Auto" & p_var < 0.05 & Sex == "F") %>% 
+  n_distinct()
+
+deltaM_Vm %>%
+  filter(CHROM_SH == "Auto") %>% 
+  filter(p_var < 0.05) %>% 
+  ggplot(aes(x=bias, y=(deltaM_), fill=Sex, col=NULL))+
+  geom_boxplot(notch=TRUE)+
+  #facet_grid(rows = vars(Sex))+
+  geom_hline(yintercept=0, color="black", linetype="dashed", size=1)+
+  labs(title = paste("male =",count_M, ", female =", count_F, "; Auto; pVm < 0.05"))+
+  labs(y=expression(Delta*"M"))+
+  coord_flip()+
+  scale_fill_manual(values=c("#C6000F", "dodgerblue4"))
+#
+#X-Chrom
+count_M <- filter(deltaM_Vm, CHROM_SH == "X" & p_var < 0.05 & Sex == "M") %>% 
+  n_distinct()
+count_F <- filter(deltaM_Vm, CHROM_SH == "X" & p_var < 0.05 & Sex == "F") %>% 
+  n_distinct()
+
+deltaM_Vm %>%
+  filter(CHROM_SH == "X") %>% 
+  filter(p_var < 0.05) %>% 
+  ggplot(aes(x=bias, y=(deltaM_), fill=Sex, col=NULL))+
+  geom_boxplot(notch=TRUE)+
+  #facet_grid(rows = vars(Sex))+
+  geom_hline(yintercept=0, color="black", linetype="dashed", size=1)+
+  labs(title = paste("male =",count_M, ", female =", count_F, "; X-Chromosome; pVm < 0.05"))+
+  labs(y=expression(Delta*"M"))+
+  coord_flip()+
+  scale_fill_manual(values=c("#C6000F", "dodgerblue4"))
+
+
+
+```
+
+
+#FlyAtlas Database
+```{r}
+library(dbplyr)
+library(dplyr)
+library(DBI)
+library(RSQLite)
+library(doParallel)
+
+
+SexBias <- fread("../data/SexBias_TMM2.txt") %>% 
+  select(!V1)
+
+mel.ID <- fread("../data/Dsrt_LOC2fbgn.txt") %>% 
+  rename(geneID=dsrt_id) %>% 
+  inner_join(SexBias, by = "geneID") %>% 
+  select(Dmel_fbgn) %>% 
+  filter(!is.na(Dmel_fbgn))
+
+ser.ID <- fread("../data/Dsrt_LOC2fbgn.txt") %>% 
+  rename(geneID=Dmel_fbgn)
+
+dir.create("FlyAtlasTables", showWarnings = FALSE)
+
+detectCores()
+registerDoParallel(7)
+
+
+start <- proc.time()[3]
+FlyAtlas <- foreach(i = 1:n_distinct(mel.ID$Dmel_fbgn), .combine = rbind, 
+                    .packages = 'tidyverse',
+                    .errorhandling = "remove") %dopar% {
+
+  
+  genename =  mel.ID$Dmel_fbgn[i] 
+  
+  download.file(url = paste("https://motif.mvls.gla.ac.uk/FA2Direct/index.html?fbgn=",genename,"&tableOut=gene", sep = ""),
+                destfile = paste("FlyAtlasTables/",genename,".txt", sep = ""), mode = "wb")
+  
+  
+  read.delim(paste("FlyAtlasTables/",genename,".txt", sep = ""), header = FALSE, sep = "\t") %>% 
+    select(c(1,4,7)) %>%
+    set_names("Tissue", "Enrch_M", "Enrch_F") %>% 
+    mutate(geneID = genename,
+           Enrichment = case_when(Tissue == "Testis" ~ Enrch_M,
+                                  Tissue == "Accessory glands" ~ Enrch_M,
+                                  Tissue == "Ovary" ~ Enrch_F,
+                                  Tissue == "Mated Spermatheca" ~ Enrch_F)) %>% 
+    filter(!is.na(Enrichment)) %>% 
+    select(c(1,4:5))
+  # 
+  # if (i==1) {temp -> FlyAtlas}
+  # if (i>=2) {rbind(temp, FlyAtlas) -> FlyAtlas}
+}
+
+time <- proc.time()[3] - start
+
+write.csv(FlyAtlas, "../data/FlyAtlas.csv")
+
+
+```
+
+Plotting FlyAtlas Results
+```{r}
+FlyAtlas <- read.csv("../data/FlyAtlas.csv")
+
+ser.ID <- fread("../data/Dsrt_LOC2fbgn.txt") %>% 
+  rename(geneID=Dmel_fbgn)
+
+FlyAtlas %>% 
+  left_join(ser.ID, by = "geneID") %>%
+  select(dsrt_id, Tissue, Enrichment) %>% 
+  rename(geneID = dsrt_id)-> Fly
+
+SexBias <- fread("../data/SexBias_TMM2.txt") %>% 
+  select(!V1)
+
+###############################################################
+###Remove all genes with enrichment > 2
+SexBias %>% 
+  anti_join(filter(Fly, Enrichment > 2), by = "geneID") -> SexBias.Strict
+
+
+
+SexBias.Strict %>% 
+  select(geneID, bias, CHROM_SH, sexbias, sexbias_MA) %>% 
+  pivot_longer(cols = c("sexbias", "sexbias_MA"), names_to = "Treatment", values_to = "sexbias") %>% 
+  mutate(Treatment = ifelse(Treatment == "sexbias", "ANC", "MA")) ->
+  SexBias_tall
+
+SexBias.Strict %>%
+  select(geneID, bias, deltaM_M, deltaM_F, sexbias, sexbias_MA) %>% 
+  pivot_longer(cols = c("deltaM_M", "deltaM_F"), 
+               names_to = c(".value", "Sex"), names_sep = "_") %>% 
+  left_join(CHROM, by ="geneID") ->
+  deltaM
+### Plotting 
+
+##R1: Mutations Reduce Sex-Biased Gene Expression 
+#Histogram: 
+count <- SexBias.Strict %>% 
+  n_distinct
+
+SexBias_tall %>% 
+  filter(CHROM_SH == "Auto") %>%
+  ggplot(aes(x=abs(sexbias), fill= Treatment)) +
+  geom_histogram(alpha=0.7, binwidth = 0.1, position="identity")+
+  labs(x=expression("Absolute Sex-bias"), title = paste("n =", count))+
+  theme_classic()+
+  theme(legend.position = "none")
+  
+#Boxplot: Sex-bias by Sex-biased class
+SexBias.Strict %>%
+  pivot_longer(cols= c("sexbias", "sexbias_MA"), names_to = "type", values_to = "sexbias") %>% 
+  #(CHROM_SH == "Auto") %>%
+  ggplot(aes(x=bias, y=abs(sexbias), fill= type)) +
+  theme_classic() +
+  geom_boxplot(notch = TRUE)+
+  labs(x=expression("Sex-bias Category"), y="Absolute Sex-bias", title = paste("n =", count, "; FlyAtlas Enrich < 2"))+
+  coord_flip()+
+  theme(legend.position = "none")
+
+
+##R2: deltaM
+count <- filter(deltaM, CHROM_SH == "Auto")$geneID %>% 
+  n_distinct()
+
+deltaM %>% 
+  filter(CHROM_SH == "Auto") %>%
+  ggplot(aes(x=deltaM, fill=Sex, col=NULL))+
+  geom_histogram(alpha = 0.7, binwidth = 0.05, position = "identity")+
+  labs(x=expression(Delta*"M"), title = paste("n =", count, "; FlyAtlas Enrich < 2; Auto"))+
+  geom_vline(xintercept=0, color="black", linetype="dashed", size=1)+
+  scale_fill_manual(values=c("#C6000F", "dodgerblue4"))+
+  theme_classic()+
+  scale_x_continuous(breaks = c(-2,-1,0,1,2,3,4))+
+  ylim(0,600)+
+  theme(legend.position = "none")
+
+
+deltaM %>% 
+  filter(CHROM_SH == "Auto") %>%
+  ggplot(aes(x=bias, y=deltaM, fill=Sex, col=NULL))+
+  geom_boxplot(notch=TRUE)+
+  geom_hline(yintercept=0, color="black", linetype="dashed", size=1)+
+  labs(y=expression(Delta*"M"), , title = paste("n =", count, "; FlyAtlas Enrich < 2; Auto"))+
+  coord_flip()+
+  scale_fill_manual(values=c("#C6000F", "dodgerblue4", "#999999"))+
+  theme_classic()+
+  theme(axis.line= element_line(colour = "black", size=1.5),
+                axis.ticks = element_line(colour = "black", size = 1),
+        text = element_text(size = 20),
+        legend.position = "none")+
+  ylim(-2,4)
+  
+count <- filter(deltaM, CHROM_SH == "X")$geneID %>% 
+  n_distinct()
+
+deltaM %>% 
+  filter(CHROM_SH == "X") %>%
+  ggplot(aes(x=deltaM, fill=Sex, col=NULL))+
+  geom_histogram(alpha = 0.7, binwidth = 0.05, position = "identity")+
+  labs(x=expression(Delta*"M"), title = paste("n =", count, "; FlyAtlas Enrich < 2; X-Chrom"))+
+  geom_vline(xintercept=0, color="black", linetype="dashed", size=1)+
+  scale_fill_manual(values=c("#C6000F", "dodgerblue4"))+
+  theme_classic()+
+  theme(legend.position = "none")
+
+deltaM %>% 
+  filter(CHROM_SH == "X") %>%
+  ggplot(aes(x=bias, y=deltaM, fill=Sex, col=NULL))+
+  geom_boxplot(notch=TRUE)+
+  # facet_grid(cols = vars(Sex))+
+  geom_hline(yintercept=0, color="black", linetype="dashed", size=1)+
+  labs(y=expression(Delta*"M"), title = paste("n =", count, "; FlyAtlas Enrich < 2; X-Chrom"))+
+  coord_flip()+
+  scale_fill_manual(values=c("#C6000F", "dodgerblue4", "#999999"))+
+  theme_classic()+
+  theme(axis.line= element_line(colour = "black", size=1.5),
+                axis.ticks = element_line(colour = "black", size = 1),
+        text = element_text(size = 20))
+
+```
+###play
+```{r}
+
+library(data.table)
+library(tidyverse)
+library(doParallel)
+library(lme4)
+library(car)
+
+#Read in Data
+dat <- fread("../data/normData_tall_coexpressed2_incAncestor_TMM_strictCPM2.txt") %>%
+  filter(!is.na(CHROM)) %>% 
+  mutate(Recip = case_when(str_detect(sampleID, "FM") ~ "FM",
+                        str_detect(sampleID, "MM") ~ "MM",
+                        str_detect(sampleID, "MF") ~ "MF",
+                        str_detect(sampleID, "FF") ~ "FF")) %>% 
+  filter(!(CHROM == "X" &  Recip == "MM")) %>% 
+  mutate(expr_TMM = 2^expr)
+
+
+SexBias <- fread("../data/SexBias_TMM2.txt") %>% 
+   select(!V1)
+
+dat
+
+#########################
+for(i in 1:100){  
+  genename <- unique(dat$geneID)[i]
+  
+  #MAle
+  dat %>% 
+    filter(geneID == genename & 
+             group == "MA", offspringSex == "male") -> testMA
+
+
+    #####################################
+    ##Mehtod 1
+    #################################### 
+    
+    model1 <- lmer(expr_TMM ~ extractionBatch + libraryBatch + 
+                     freezeTime + Recip + (1|line), data = testMA)
+    anova(model1)
+    vc_MA <- VarCorr(model1)
+    Vm <- data.frame(vc_MA,comp=c("Variance"))[1,4]
+    
+    #############
+    
+    temp_M1 <- data.frame(cbind(genename, Vm))
+    temp_M1$method = "lmer"
+    
+    
+    #####################################
+    ##Mehtod 2
+    ####################################
+    
+    #MAle
+    dat %>% 
+      filter(geneID == genename & 
+               group == "MA", offspringSex == "male") -> testMA
+    
+    
+    model2 <- lm(expr_TMM ~ extractionBatch + libraryBatch + 
+                   freezeTime + Recip + line, data = testMA)
+    
+    
+    Aov <- Anova(model2)
+    
+    Vm <- Aov$`Sum Sq`[5]/Aov$Df[5]
+    
+    
+    #############
+    
+    temp_M2 <- data.frame(cbind(genename, Vm))
+    temp_M2$method = "Aov"
+    
+    temp <-  rbind(temp_M1, temp_M2)
+    
+    if(i < 2){vm.compare <- temp}
+    if(i > 1){vm.compare <- rbind(vm.compare, temp)}
+  }
+  
+vm.compare %>% 
+  pivot_wider(names_from = "method", values_from = "Vm") %>% 
+  ggplot(aes(x=lmer, y= Aov))+
+  geom_point()
+
+
+vm.compare %>% 
+  pivot_wider(names_from = "method", values_from = "Vm") %>% 
+  rename(geneID = genename) %>% 
+  inner_join(Vm, by = "geneID") %>% 
+  ggplot(aes(x=varM, y= Aov))+
+  geom_point()
+  
+#########################################################
+
+fread(file = "../data/Variance_exprTMM.txt") %>% 
+  select(-V1)-> var2
+read.table(file = '../data/QG_MA2.txt', sep = '\t', header = TRUE) -> bigDat
+
+########################################################
+
+var2 %>% 
+  inner_join(Var, by "geneID") -> d
+
+var2 %>% 
+  select(geneID, Vm, bias, sex) %>% 
+  pivot_wider(names_from = "sex", values_from = "Vm", names_prefix = "my_var") %>% 
+  inner_join(select(bigDat, geneID, varF, p_varF, varM, p_varM), by= c("geneID")) -> 
+  compare
+
+compare %>%
+  filter(my_varM < 10000 & my_varF < 10000 ) %>% 
+  ggplot(aes(x= varM, y= my_varM))+
+  geom_point()
+  
+filter(dat, treatment != "MA") %>% 
+  count(line)
+
+
+```

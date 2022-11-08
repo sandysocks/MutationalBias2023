@@ -1,0 +1,126 @@
+---
+title: "Final Figures"
+author: "Sandy Hickson"
+date: '2022-11-07'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,warning = FALSE, message = FALSE)
+```
+
+#Final Plots
+```{r, echo=TRUE}
+library(data.table)
+library(tidyverse)
+
+SexBias <- fread("../data/SexBias_TMM2.txt") %>% 
+  select(!V1)
+
+CHROM <- fread("../data/scaff2gene.txt") %>%
+  select(!V1) %>%
+  mutate(CHROM_SH=case_when(CHROM=="X" ~ "X",
+                            CHROM=="NA" ~ "NA",
+                            TRUE ~ "Auto")) %>%
+  select(geneID,CHROM, CHROM_SH)
+
+SexBias %>% 
+  select(geneID, bias, CHROM_SH, sexbias, sexbias_MA) %>% 
+  pivot_longer(cols = c("sexbias", "sexbias_MA"), names_to = "Treatment", values_to = "sexbias") %>% 
+  mutate(Treatment = ifelse(Treatment == "sexbias", "ANC", "MA")) ->
+  SexBias_tall
+
+SexBias %>%
+  select(geneID, bias, deltaM_M, deltaM_F, sexbias, sexbias_MA) %>% 
+  pivot_longer(cols = c("deltaM_M", "deltaM_F"), 
+               names_to = c(".value", "Sex"), names_sep = "_") %>% 
+  left_join(CHROM, by ="geneID") %>% 
+  filter(abs(deltaM) < 4) ->
+  deltaM
+
+#####################################################
+##Fig.1: Mutations Reduce Sex-Biased Gene Expression 
+#Fig.1a:Histogram, sex-bias of all genes in MA and ANC
+SexBias_tall %>% 
+  filter(CHROM_SH == "Auto") %>%
+  ggplot(aes(x=abs(sexbias), fill= Treatment)) +
+  geom_histogram(alpha=0.7, binwidth = 0.1, position="identity")+
+  labs(x=expression("Absolute Sex-bias"))+
+  theme_classic() -> Fig1a
+
+Fig1a
+  
+#Fig.1b:Boxplot, sex-bias of all genes in ANC and MA by sex-biased class
+SexBias %>%
+  pivot_longer(cols= c("sexbias", "sexbias_MA"), names_to = "type", values_to = "sexbias") %>%
+  ggplot(aes(x=bias, y=abs(sexbias), fill= type)) +
+  theme_classic() +
+  geom_boxplot()+
+  labs(x=expression("Sex-bias Category"), y="Absolute Sex-bias")+
+  coord_flip() -> Fig1b
+
+Fig1b
+
+##Fig.2: Mutational bias (dM)
+#Fig.2a:Histogram, Autosomal genes 
+deltaM %>% 
+  filter(CHROM_SH == "Auto") %>%
+  ggplot(aes(x=(deltaM), fill=Sex, col=NULL))+
+  geom_histogram(alpha = 0.7, binwidth = 0.05, position = "identity")+
+  labs(x=expression(Delta*"M"))+
+  geom_vline(xintercept=0, color="black", linetype="dashed", size=1)+
+  scale_fill_manual(values=c("#C6000F", "dodgerblue4"))+
+  theme_classic()+
+  scale_x_continuous(breaks = c(-2,-1,0,1,2,3,4))+
+  ylim(0,600)+
+  theme(legend.position = "none")-> Fig2a
+
+Fig2a
+
+#Fig.2b:Boxplot, Autosomal genes 
+deltaM %>% 
+  filter(CHROM_SH == "Auto") %>%
+  ggplot(aes(x=bias, y=deltaM, fill=Sex, col=NULL))+
+  geom_boxplot()+
+  geom_hline(yintercept=0, color="black", linetype="dashed", size=1)+
+  labs(y=expression(Delta*"M"))+
+  coord_flip()+
+  scale_fill_manual(values=c("#C6000F", "dodgerblue4", "#999999"))+
+  theme_classic()+
+  theme(axis.line= element_line(colour = "black", size=1.5),
+                axis.ticks = element_line(colour = "black", size = 1),
+        text = element_text(size = 20))+
+  ylim(-2,4) -> Fig2b
+
+Fig2b
+  
+#Fig.2c:Histogram, X-linked genes 
+deltaM %>% 
+  filter(CHROM_SH == "X") %>%
+  ggplot(aes(x=deltaM, fill=Sex, col=NULL))+
+  geom_histogram(alpha = 0.7, binwidth = 0.05, position = "identity")+
+  labs(x=expression(Delta*"M"))+
+  geom_vline(xintercept=0, color="black", linetype="dashed", size=1)+
+  scale_fill_manual(values=c("#C6000F", "dodgerblue4"))+
+  theme_classic() -> Fig2c
+
+Fig2c
+
+#Fig.2c:Boxplot, X-linked genes 
+deltaM %>% 
+  filter(CHROM_SH == "X") %>%
+  ggplot(aes(x=bias, y=deltaM, fill=Sex, col=NULL))+
+  geom_boxplot()+
+  geom_hline(yintercept=0, color="black", linetype="dashed", size=1)+
+  labs(y=expression(Delta*"M"))+
+  coord_flip()+
+  scale_fill_manual(values=c("#C6000F", "dodgerblue4", "#999999"))+
+  theme_classic()+
+  theme(axis.line= element_line(colour = "black", size=1.5),
+                axis.ticks = element_line(colour = "black", size = 1),
+        text = element_text(size = 20))+
+  ylim(-2,4) -> Fig2d
+
+Fig2d
+
+```

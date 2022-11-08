@@ -1,0 +1,413 @@
+---
+title: "Sandy_MA_2022"
+author: "Sandy Hickson"
+date: '2022-08-28'
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+#Sex-bias Classifications
+Here, we classify sex-bias (M,F,U) for each coexpressed gene within the mutation accumulation (MA) and ancestral treatment (ANC) treatments, using the log2 fold-change difference in expression (exp) between males and females.
+this code chunck produces 'SexBias_TMM2.txt', raw data for this code chunk is published at 'X'.
+```{r, echo=FALSE}
+library(data.table)
+library(tidyverse)
+library(doParallel)
+
+#Read in raw Data (published at: 'URL')
+dat <- fread("../data/normData_tall_coexpressed2_incAncestor_TMM_strictCPM2.txt") %>% 
+  filter(treatment == "Ancestor" |
+          treatment == "MA" ) %>% 
+  filter(!is.na(CHROM)) %>% 
+  mutate(Recip = case_when(str_detect(sampleID, "FM") ~ "FM",
+                        str_detect(sampleID, "MM") ~ "MM",
+                        str_detect(sampleID, "MF") ~ "MF",
+                        str_detect(sampleID, "FF") ~ "FF")) %>% 
+  filter(!(CHROM == "X" &  Recip == "MM"))
+
+
+#DoParallel
+detectCores()
+registerDoParallel(6)
+start <- proc.time()[3]
+# 
+SexBias <- foreach(i = 1:n_distinct(dat$geneID), .combine = rbind,
+                    .packages = 'tidyverse',
+                    .errorhandling = "remove") %dopar% {
+
+genename = unique(dat$geneID)[i]
+  
+  #Sex-bias in Anc  
+  dat %>% 
+    filter(geneID == genename) -> test
+    
+     test[grepl("226", test$line),] -> test
+     
+     model <- lm(as.numeric(expr) ~ offspringSex + Recip, data=test)
+        
+        anova(model) -> pvalues
+        
+        pvalues$"Pr(>F)"[1] -> pSex
+        
+        as.data.frame(cbind(genename, pSex)) -> pdata
+        
+        test %>% filter(offspringSex == "female") -> tempF
+        
+        test %>% filter(offspringSex == "male") -> tempM
+        
+        mean(tempF$expr) -> meanF
+        
+        mean(tempM$expr) -> meanM
+        
+        meanM - meanF -> meandif
+        
+        ifelse(meandif>1, "M", ifelse(meandif>-1 & meandif<1, "U", "F")) -> bias
+        
+        
+        as.data.frame(cbind(meanM, meanF, meandif, bias)) -> foldchange
+
+        
+ ##################################################
+        #Sex-bias in MA
+
+        filter(dat, geneID == genename) -> test_MA
+        
+        test_MA[!grepl("226", test_MA$line),] -> test_MA
+        
+        model_MA <- lm(as.numeric(expr) ~ offspringSex + Recip, data=test_MA)
+        
+        anova(model_MA) -> pvalue_MA
+        
+        pvalue_MA$"Pr(>F)"[1] -> pSex_MA
+        
+        test_MA %>% filter(offspringSex == "female") -> tempF_MA
+        
+        test_MA %>% filter(offspringSex == "male") -> tempM_MA
+        
+        mean(tempF_MA$expr) -> meanF_MA
+        
+        mean(tempM_MA$expr) -> meanM_MA
+        
+        meanM_MA - meanF_MA -> meandif_MA
+        
+        ifelse(meandif_MA>1, "M", ifelse(meandif_MA>-1 & meandif_MA<1, "U", "F")) -> bias_MA
+        
+        as.data.frame(cbind(pSex_MA, meanM_MA, meanF_MA, meandif_MA, bias_MA)) -> foldchange_MA
+        
+        
+        
+        temp <- cbind(pdata, foldchange, foldchange_MA)
+        temp
+        
+ }
+
+time <- proc.time()[3] - start
+
+SexBias %>% 
+  mutate_at(c(2:5,7:10), as.numeric) -> SexBias
+
+SexBias$pSex_BH <- p.adjust(SexBias$pSex, method = "BH")
+SexBias$pSex_BH_MA <- p.adjust(SexBias$pSex_MA, method = "BH")
+
+SexBias$meandifdif <- abs(SexBias$meandif_MA) - abs(SexBias$meandif)
+
+SexBias$meandifdiv <- (SexBias$meandif_MA)/(SexBias$meandif)
+
+SexBias$meandifdiffoSexBiasmales <- abs(SexBias$meanM_MA) - abs(SexBias$meanM)
+
+SexBias$meandifdiffoSexBiasfemales <- abs(SexBias$meanF_MA) - abs(SexBias$meanF)
+
+SexBias$meandifdifmoSexBiase <- (SexBias$meandifdiffoSexBiasmales) - (SexBias$meandifdiffoSexBiasfemales)
+
+##deltaM
+
+SexBias %>% 
+  mutate(deltaM_M=(((meanM_MA - meanM)/28)/meanM)*100) %>% 
+  mutate(deltaM_F=(((meanF_MA - meanF)/28)/meanF)*100) ->
+  SexBias
+
+##Filter out false postives for bias
+SexBias %>% 
+  mutate(bias = case_when(pSex_BH > 0.05 ~ "U",
+                          TRUE ~ bias),
+         bias_MA = case_when(pSex_BH_MA > 0.05 ~ "U",
+                          TRUE ~ bias_MA)) ->
+  SexBias
+
+write.table(SexBias, "../data/SexBias_TMM2.txt")
+
+```
+
+#Statistical Analysis
+##Sex-bias: Count Data
+Here, we use Chi-squared tests to detect changes in the number of genes 
+within each sex biased class.
+```{r}
+library(data.table)
+library(tidyverse)
+
+CHROM <- fread("../data/scaff2gene.txt") %>% 
+  select(!V1) %>% 
+  mutate(CHROM_SH=case_when(CHROM=="X" ~ "X",
+                            CHROM=="NA" ~ "NA",
+                            TRUE ~ "Auto")) %>% 
+  select(geneID,CHROM, CHROM_SH)
+
+SexBias <- fread("../data/SexBias_TMM2.txt") %>% 
+  select(!V1)
+
+############################################
+### Sex Bias Count Data
+#
+SexBias %>% 
+  count(bias_MA) %>% 
+  rename(MA=n, bias = bias_MA) %>%   inner_join(rename(count(SexBias, bias), ANC = n), by = "bias") -> bias_count
+
+
+SexBias %>% 
+  mutate(bias_bin = case_when(bias == "U" ~ "U",
+                              TRUE ~ "B"),
+         bias_bin_MA = case_when(bias_MA == "U" ~ "U",
+                              TRUE ~ "B")) -> biasBin
+
+  
+
+#########################
+#Comparing all classes
+chisq <- chisq.test(data_frame(ANC = bias_count$ANC, MA = bias_count$MA), correct = FALSE)
+chisq
+chisq$p.value
+
+#########################
+#Comparing bias vs unbiased
+SexBias %>% 
+  mutate(bias_bin = case_when(bias == "U" ~ "U",
+                              TRUE ~ "B"),
+         bias_bin_MA = case_when(bias_MA == "U" ~ "U",
+                              TRUE ~ "B")) -> biasBin
+
+All_ANC <- count(biasBin, bias_bin) 
+All_MA <- count(biasBin, bias_bin_MA)
+
+cbind(All_ANC$n, All_MA$n) -> SB_All 
+colnames(SB_All)<-  c("ANC", "MA")
+rownames(SB_All)<-  c("B", "U")
+
+chisq2 <- chisq.test(SB_All, correct = FALSE)
+chisq2
+chisq2$p.value
+chisq2$observed
+chisq2$expected
+
+#########################
+#within sex-biased genes
+#Male-bias
+MB_ANC <- filter(SexBias, bias == "M") %>% 
+  count(bias) 
+
+MB_MA <- filter(SexBias, bias_MA == "M") %>% 
+  count(bias_MA)
+
+cbind(MB_ANC$n, MB_MA$n) %>% 
+  set_names("ANC", "MA") %>% 
+  data_frame() -> MB
+
+chisq3 <- chisq.test(MB, correct = FALSE)
+chisq3
+chisq3$p.value
+chisq3$observed
+chisq3$expected
+
+
+#Female-bias
+FB_ANC <- filter(SexBias, bias == "F") %>% 
+  count(bias) 
+
+FB_MA <- filter(SexBias, bias_MA == "F") %>% 
+  count(bias_MA)
+
+cbind(FB_ANC$n, FB_MA$n) %>% 
+  set_names("ANC", "MA") %>% 
+  data_frame() -> FB
+
+chisq3 <- chisq.test(FB, correct = FALSE)
+chisq3
+chisq3$p.value
+chisq3$observed
+chisq3$expected
+
+#########################
+#between unbiased genes
+SB_ANC <- filter(SexBias, bias != "U") %>% 
+  count(bias) 
+
+SB_MA <- filter(SexBias, bias_MA != "U") %>% 
+  count(bias_MA)
+
+cbind(SB_ANC$n, SB_MA$n) -> SB 
+colnames(SB)<-  c("ANC", "MA")
+rownames(SB)<-  c("F", "M")
+
+chisq3 <- chisq.test(SB, correct = FALSE)
+chisq3
+chisq3$p.value
+chisq3$observed
+chisq3$expected
+
+```
+
+##Sex-bias: Effect Size data
+Here, we use a Permutation-based ANOVA and Wilcoxon rank sum tests, which are both a non-parametric tests.
+```{r}
+library(data.table)
+library(tidyverse)
+library(permuco)
+
+setwd("C:/Users/Sandy/OneDrive - The University of Queensland/MutationBias_2022/src")
+
+SexBias <- fread("../data/SexBias_TMM2.txt") %>% 
+  select(!V1)
+
+SexBias %>% 
+  mutate(bias_bin = case_when(bias == "U" ~ "U",
+                              TRUE ~ "B"),
+         bias_bin_MA = case_when(bias_MA == "U" ~ "U",
+                              TRUE ~ "B")) -> biasBin
+
+#######################################################
+#Permutation based anova
+SexBias %>% 
+  select(geneID, bias, sexbias, sexbias_MA) %>% 
+  pivot_longer(cols = c("sexbias", "sexbias_MA"), 
+               names_to = "treat", values_to = "sexbias") -> bias_perm
+
+aovperm(abs(sexbias) ~ treat*bias, np= 10000, data = biasBin_perm)
+  
+bias_perm %>%
+  group_by(bias, treat) %>% 
+  summarise(median(abs(sexbias))) %>% 
+  pivot_wider(names_from = "treat", values_from = "median(abs(sexbias))") %>% 
+  mutate(dif = sexbias - sexbias_MA)#?!?
+
+###Post-hoc testing
+##Wilcoxon rank sum tests
+#All Genes
+test1 <- wilcox.test(abs(SexBias$sexbias), abs(SexBias$sexbias_MA), 
+                     alternative = "two.sided")
+test1
+test1$p.value
+
+#SB genes
+SB_test <- wilcox.test(abs(filter(biasBin, bias_bin == "B")$sexbias), 
+                     abs(filter(biasBin, bias_bin == "B")$sexbias_MA), 
+                     alternative = "two.sided")
+SB_test
+SB_test$p.value
+#UB genes
+test2 <- wilcox.test(abs(filter(SexBias, bias == "U")$sexbias), 
+                     abs(filter(SexBias, bias == "U")$sexbias_MA), 
+                     alternative = "two.sided")
+test2
+test2$p.value
+
+#MB 
+test3 <- wilcox.test((filter(SexBias, bias == "M")$sexbias), 
+                     (filter(SexBias, bias == "M")$sexbias_MA), 
+                     alternative = "two.sided")
+test3
+test3$p.value
+
+#FB
+test4 <- wilcox.test((filter(SexBias, bias == "F")$sexbias), 
+                     (filter(SexBias, bias == "F")$sexbias_MA), 
+                     alternative = "two.sided",)
+test4
+test4$p.value
+```
+
+##Mutational Bias: Significance testing
+```{r}
+library(data.table)
+library(tidyverse)
+library(permuco)
+
+
+SexBias <- fread("../data/SexBias_TMM2.txt") %>% 
+   select(!V1)
+  
+
+SexBias %>%
+  select(geneID, bias, deltaM_M, deltaM_F, sexbias, sexbias_MA, pSex_BH, CHROM, CHROM_SH) %>% 
+  pivot_longer(cols = c("deltaM_M", "deltaM_F"), 
+               names_to = c(".value", "Sex"), names_sep = "_") ->
+  deltaM
+
+#######################################################
+#Permutation based anova
+Aov_dM <-aovperm(deltaM ~ Sex*bias, np= 10000, 
+                 data = filter(deltaM, CHROM_SH == "Auto"))
+Aov_dM#?!?
+
+###Post-hoc testing
+##Mann-Whitney Test: Autosomal genes
+#All Genes
+Test1 <- wilcox.test((SexBias$deltaM_M), (SexBias$deltaM_F), 
+                     alternative = "two.sided")
+Test1
+Test1$p.value
+
+#Male-bias
+Test2 <- wilcox.test(filter(SexBias, bias == "M", CHROM_SH == "Auto")$deltaM_M,
+                     filter(SexBias, bias == "M", CHROM_SH == "Auto")$deltaM_F, 
+                     alternative = "two.sided")
+Test2
+Test2$p.value
+
+#Female-bias
+Test3 <- wilcox.test(filter(SexBias, bias == "F", CHROM_SH == "Auto")$deltaM_M,
+                     filter(SexBias, bias == "F", CHROM_SH == "Auto")$deltaM_F, 
+                     alternative = "two.sided")
+Test3
+Test3$p.value
+
+#Unbiased
+Test4 <- wilcox.test(filter(SexBias, bias == "U", CHROM_SH == "Auto")$deltaM_M,
+                     filter(SexBias, bias == "U", CHROM_SH == "Auto")$deltaM_F, 
+                     alternative = "two.sided")
+Test4
+Test4$p.value
+
+
+##Mann-Whitney Test
+#All Genes
+Test1 <- wilcox.test((SexBias$deltaM_M), (SexBias$deltaM_F), 
+                     alternative = "two.sided")
+Test1
+Test1$p.value
+
+#Male-bias
+Test2 <- wilcox.test(filter(SexBias, bias == "M", CHROM_SH == "X")$deltaM_M,
+                     filter(SexBias, bias == "M", CHROM_SH == "X")$deltaM_F, 
+                     alternative = "two.sided")
+Test2
+Test2$p.value
+
+#Female-bias
+Test3 <- wilcox.test(filter(SexBias, bias == "F", CHROM_SH == "X")$deltaM_M,
+                     filter(SexBias, bias == "F", CHROM_SH == "X")$deltaM_F, 
+                     alternative = "two.sided")
+Test3
+Test3$p.value
+
+#Unbiased
+Test4 <- wilcox.test(filter(SexBias, bias == "U", CHROM_SH == "X")$deltaM_M,
+                     filter(SexBias, bias == "U", CHROM_SH == "X")$deltaM_F, 
+                     alternative = "two.sided")
+Test4
+Test4$p.value
+
+```
+
+
